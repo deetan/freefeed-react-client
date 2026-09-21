@@ -18,8 +18,6 @@ const foldedAreas = {
   commentAnonymous: 700 * 110,
 };
 
-const isSafari = /^((?!chrome|android).)*safari/i.test(navigator?.userAgent ?? '');
-
 export function Expandable({
   children,
   expanded: givenExpanded = false,
@@ -56,11 +54,6 @@ export function Expandable({
     } else {
       let targetHeight = scaledFoldedArea / width;
       targetHeight = align(content.current, targetHeight);
-      if (isSafari) {
-        // Safari has extremely large string heights, so we need to slightly
-        // reduce the clipping.
-        targetHeight -= 4;
-      }
       setMaxHeight(`${targetHeight}px`);
     }
   });
@@ -105,7 +98,12 @@ export function Expandable({
 }
 
 /**
- * Align the given offset to the bottom of the closest text string
+ * Align the given offset to the boundary between two closest text lines
+ *
+ * Text rects can be taller than the line box (it depends on the browser and on
+ * the font), so adjacent lines may overlap. The boundary between two lines is
+ * the middle of their overlap, or the bottom of the upper line if there is a
+ * gap between them (e.g. between paragraphs).
  *
  * @param {Element} rootElement
  * @param {number} targetOffset
@@ -114,27 +112,48 @@ export function Expandable({
 function align(rootElement, targetOffset) {
   const { top } = rootElement.getBoundingClientRect();
 
-  // Iterate over all the text nodes
+  // Iterate over all the text nodes and collect the (merged) line rects
   const nodeIterator = document.createNodeIterator(rootElement, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
+  const lines = [];
   let node;
-  let prev = null;
-  let current = null;
   mainLoop: while ((node = nodeIterator.nextNode())) {
     range.selectNode(node);
-    // In every text node we check all the rects
-    for (const { bottom } of range.getClientRects()) {
-      prev = current;
-      current = bottom - top;
-      if (current >= targetOffset) {
-        break mainLoop;
+    for (const rect of range.getClientRects()) {
+      if (rect.height === 0) {
+        continue;
+      }
+      const line = { top: rect.top - top, bottom: rect.bottom - top };
+      const last = lines[lines.length - 1];
+      if (last && isSameLine(last, line)) {
+        last.top = Math.min(last.top, line.top);
+        last.bottom = Math.max(last.bottom, line.bottom);
+      } else {
+        // We need one line below the target to find the last boundary
+        if (last && last.top > targetOffset) {
+          break mainLoop;
+        }
+        lines.push(line);
       }
     }
   }
-  if (!prev || !current) {
-    return targetOffset;
+
+  let result = targetOffset;
+  let minDistance = Infinity;
+  for (let i = 0; i < lines.length - 1; i++) {
+    const boundary = Math.min(lines[i].bottom, (lines[i].bottom + lines[i + 1].top) / 2);
+    const distance = Math.abs(boundary - targetOffset);
+    if (distance < minDistance) {
+      minDistance = distance;
+      result = boundary;
+    }
   }
-  return Math.abs(current - targetOffset) < Math.abs(prev - targetOffset) ? current : prev;
+  return result;
+}
+
+function isSameLine(a, b) {
+  const middle = (b.top + b.bottom) / 2;
+  return middle > a.top && middle < a.bottom;
 }
 
 let resizeObserver = null;
